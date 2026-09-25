@@ -9,6 +9,16 @@ Render deployment uses `npm start` and the included `server.js` wrapper. The
 the frontend sends a lightweight keep-alive request every 15 seconds; browser
 background suspension and Render's free-tier sleep policy can still pause it.
 
+Price alerts
+
+Every stock job also reads Croma's current selling price for that product and
+pincode. The browser saves the first successful value as the baseline. A later
+price hike or decrease is shown in the Price Change Alerts card and starts the
+ringtone. A price hike temporarily holds that product's stock signal until the
+user presses "OK, I KNOW - Restart checking". The button stops the ringtone,
+releases the hold and continues stock and price checks. Price decreases stay
+visible with the stock signal.
+
 The app stores the watchlist, filters and latest results in the browser's local
 storage. The included serverless route is required because Croma's API does not
 allow direct browser requests from a static page. Keep the route folder named

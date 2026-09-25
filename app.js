@@ -6,7 +6,8 @@
   const DEVICE_COOKIE = 'croma_stock_signal_device_id_v1';
   const SETTINGS_KEY = 'croma_stock_signal_settings_v1';
   const RESULTS_KEY = 'croma_stock_signal_results_v1';
-  const state = { running: false, timer: null, wake: null, screenLock: null, screenKeep: true, screenTimer: null, licenseTimer: null, keepAliveTimer: null, rows: new Map(), muted: false, errorTimer: null, audioContext: null, deviceId: '', licensed: false, requestErrors: 0, lastError: '' };
+  const PRICE_HISTORY_KEY = 'croma_stock_signal_price_history_v1';
+  const state = { running: false, timer: null, wake: null, screenLock: null, screenKeep: true, screenTimer: null, licenseTimer: null, keepAliveTimer: null, priceAlarmTimer: null, rows: new Map(), priceHistory: {}, priceChanges: [], priceHikeKeys: new Set(), priceAlertActive: false, priceErrors: 0, muted: false, errorTimer: null, audioContext: null, deviceId: '', licensed: false, requestErrors: 0, lastError: '' };
   const $ = id => document.getElementById(id);
   const mario = $('mario');
   const fallbackAudio = mario.getAttribute('src') || 'mario.mp3.mpeg';
@@ -26,7 +27,7 @@
       $('status').after(progressText);
     }
     const style = document.createElement('style');
-    style.textContent = '.progress-text{margin-top:6px;color:#666;font-size:12px;line-height:1.2}.offer-list{margin-top:4px;font-size:11px;line-height:1.3;font-weight:600}.chips{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.chip{width:100%;min-width:0;justify-content:space-between;padding:7px 5px;font-size:13px;gap:2px;overflow:visible}.chip span{min-width:0;flex:0 0 auto;overflow:visible;text-overflow:clip;white-space:nowrap}.chip button{flex:0 0 auto;font-size:18px}.product-coupon{display:block;width:100%;margin-top:9px}#mute,#keepAwake{grid-column:1/-1}';
+    style.textContent = '.progress-text{margin-top:6px;color:#666;font-size:12px;line-height:1.2}.offer-list{margin-top:4px;font-size:11px;line-height:1.3;font-weight:600}.chips{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.chip{width:100%;min-width:0;justify-content:space-between;padding:7px 5px;font-size:13px;gap:2px;overflow:visible}.chip span{min-width:0;flex:0 0 auto;overflow:visible;text-overflow:clip;white-space:nowrap}.chip button{flex:0 0 auto;font-size:18px}.product-coupon{display:block;width:100%;margin-top:9px}#mute,#keepAwake{grid-column:1/-1}.price-alert-list{display:grid;gap:8px;margin-top:12px}.price-event{padding:10px 12px;border-radius:10px;background:#fff;font-size:13px;font-weight:700}.price-event small{display:block;margin-top:3px;font-weight:400;color:#555}.price-event-up{border:2px solid #d54b4b;color:#a61b1b}.price-event-down{border:2px solid #35945a;color:#176b37}.price-hold{color:#a61b1b;font-weight:800}';
     const productEntryRow = $('addProduct')?.closest('.entry-row');
     const coupon = $('coupon');
     if (productEntryRow && coupon) {
@@ -91,7 +92,81 @@
     return [...new Set(String(value || '').split(/[\s,;]+/).map(item => item.trim()).filter(item => /^\d{6}$/.test(item)))];
   }
 
-  function active(row) { return row.available && (!row.offerCheck || row.offerDetected); }
+  function savePriceHistory() {
+    try { localStorage.setItem(PRICE_HISTORY_KEY, JSON.stringify(state.priceHistory)); } catch {}
+  }
+
+  function formatPrice(value) {
+    const amount = Number(value);
+    return Number.isFinite(amount) && amount > 0
+      ? new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 2 }).format(amount)
+      : 'Price unavailable';
+  }
+
+  function startPriceAlarm() {
+    if (!state.priceAlertActive || state.muted || state.priceAlarmTimer) return;
+    beep();
+    state.priceAlarmTimer = setInterval(beep, 1400);
+  }
+
+  function stopPriceAlarm() {
+    clearInterval(state.priceAlarmTimer);
+    state.priceAlarmTimer = null;
+  }
+
+  function recordPrice(result) {
+    const price = Number(result.price);
+    if (!Number.isFinite(price) || price <= 0) return;
+
+    const key = `${result.key}@${result.pincode}`;
+    const previous = state.priceHistory[key];
+    state.priceHistory[key] = { price, updatedAt: Date.now() };
+    savePriceHistory();
+    if (!previous || Number(previous.price) === price) return;
+
+    const hike = price > Number(previous.price);
+    state.priceChanges.unshift({
+      key: result.key,
+      pincode: result.pincode,
+      from: Number(previous.price),
+      to: price,
+      hike,
+      at: Date.now()
+    });
+    state.priceChanges = state.priceChanges.slice(0, 20);
+    state.priceAlertActive = true;
+    if (hike) state.priceHikeKeys.add(result.key);
+    startPriceAlarm();
+  }
+
+  function renderPricePanel() {
+    if (!$('priceStatus')) return;
+    const tracked = Object.keys(state.priceHistory).length;
+    const held = state.priceHikeKeys.size;
+    let status = state.priceAlertActive
+      ? `PRICE CHANGE ALERT · ${held ? `${held} product${held === 1 ? '' : 's'} held after price hike` : 'review the change below'}`
+      : `Price tracking ON · ${tracked} product/pincode baseline${tracked === 1 ? '' : 's'} saved`;
+    if (state.priceErrors) status += ` · ${state.priceErrors} price lookup error${state.priceErrors === 1 ? '' : 's'}`;
+    $('priceStatus').textContent = status;
+    $('priceAlerts').innerHTML = state.priceChanges.length
+      ? state.priceChanges.slice(0, 8).map(change => `<div class="price-event ${change.hike ? 'price-event-up' : 'price-event-down'}"><b>${change.hike ? 'PRICE HIKED' : 'PRICE DECREASED'}</b> · ${escapeHtml(change.key)} @ ${escapeHtml(change.pincode)}<small>${formatPrice(change.from)} → ${formatPrice(change.to)} · ${change.hike ? 'stock signal held until acknowledgement' : 'stock signal remains visible'}</small></div>`).join('')
+      : '<div class="status-line">First scan sets the price baseline. Any later hike or drop will alert.</div>';
+    $('ackPrice').disabled = !state.priceAlertActive;
+    $('ackPrice').textContent = state.priceAlertActive ? 'OK, I KNOW — Restart checking' : 'No active price alert';
+  }
+
+  function acknowledgePriceAlerts() {
+    state.priceAlertActive = false;
+    state.priceHikeKeys.clear();
+    state.rows.forEach(row => { row.priceHikeActive = false; });
+    stopPriceAlarm();
+    renderSignals();
+    render();
+    $('status').textContent = 'Price alert acknowledged. Stock and price checking resumed.';
+    if (!state.running && state.licensed) start();
+  }
+
+  function active(row) { return row.available && (!row.offerCheck || row.offerDetected) && !row.priceHikeActive; }
   function escapeHtml(value) { return String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char])); }
 
   function renderChips() {
@@ -132,6 +207,12 @@
   function setMute() {
     $('mute').textContent = state.muted ? '🔇 Sound muted' : '🔊 Sound on';
     $('mute').classList.toggle('on', state.muted);
+    if (state.muted) {
+      stopErrorAlarm();
+      stopPriceAlarm();
+    } else if (state.priceAlertActive) {
+      startPriceAlarm();
+    }
   }
 
   function counts() {
@@ -148,10 +229,11 @@
 
   function renderSignals() {
     const visible = [...state.rows.values()].filter(active).sort((a, b) => a.key.localeCompare(b.key));
+    const held = [...state.rows.values()].filter(row => row.available && row.priceHikeActive).length;
     const signals = visible.flatMap(row => row.pincodes.map(pincode => `${row.key} at ${pincode}`));
     $('status').innerHTML = signals.length
       ? signals.map(signal => `<div>${escapeHtml(signal)}</div>`).join('')
-      : 'Checking stock...';
+      : held ? 'Stock signal held while price-hike alert is active.' : 'Checking stock...';
     return visible;
   }
 
@@ -215,13 +297,18 @@
 
   function render() {
     const visible = [...state.rows.values()].filter(active).sort((a, b) => a.key.localeCompare(b.key));
-    $('results').innerHTML = visible.length ? visible.map(row => { const hasOffer = row.offerCheck && row.offerDetected; return `<tr><td><b>${escapeHtml(row.key)}</b></td><td>${row.pincodes.map(escapeHtml).join(', ')}</td><td class="${hasOffer ? 'offer' : 'stock'}">${hasOffer ? `<b>STOCK WITH OFFER</b>${offerMarkup(row.offerName)}` : 'IN STOCK'}</td></tr>`; }).join('') : '<tr><td class="empty" colspan="3">No qualifying stock yet</td></tr>';
+    $('results').innerHTML = visible.length ? visible.map(row => {
+      const hasOffer = row.offerCheck && row.offerDetected;
+      const price = Number(row.price) > 0 ? `<small>Price: ${formatPrice(row.price)}</small>` : '';
+      return `<tr><td><b>${escapeHtml(row.key)}</b></td><td>${row.pincodes.map(escapeHtml).join(', ')}</td><td class="${hasOffer ? 'offer' : 'stock'}">${hasOffer ? `<b>STOCK WITH OFFER</b>${offerMarkup(row.offerName)}` : 'IN STOCK'}${price}</td></tr>`;
+    }).join('') : '<tr><td class="empty" colspan="3">No qualifying stock yet</td></tr>';
     $('stockCount').textContent = visible.length;
     $('locationCount').textContent = visible.reduce((sum, row) => sum + row.pincodes.length, 0);
     const rowErrors = [...state.rows.values()].reduce((sum, row) => sum + (row.errors?.length || 0), 0);
     $('errorCount').textContent = rowErrors + state.requestErrors;
     $('errorDetail').textContent = state.lastError ? `Last error: ${state.lastError}` : '';
     $('offerNotice').style.display = visible.some(row => row.offerCheck && row.offerDetected) ? 'block' : 'none';
+    renderPricePanel();
     try { localStorage.setItem(RESULTS_KEY, JSON.stringify([...state.rows.values()].slice(-MAX_PRODUCTS))); } catch {}
   }
 
@@ -353,6 +440,7 @@
     const allowed = new Set(keys);
     [...state.rows.keys()].forEach(key => { if (!allowed.has(key)) state.rows.delete(key); });
     state.requestErrors = 0;
+    state.priceErrors = 0;
     state.lastError = '';
     const coupon = $('coupon').dataset.on === 'true';
     const jobs = keys.map(item => spec(item)).filter(Boolean).flatMap(item => pins.map(pincode => ({
@@ -379,10 +467,15 @@
         }
       }
       results.forEach(result => {
-        const row = state.rows.get(result.key) || { key: result.key, offerCheck: result.offerCheck, offerDetected: result.offerDetected, offerName: result.offerName || '', pincodes: [], errors: [] };
+        if (result.priceError) state.priceErrors += 1;
+        recordPrice(result);
+        const row = state.rows.get(result.key) || { key: result.key, offerCheck: result.offerCheck, offerDetected: result.offerDetected, offerName: result.offerName || '', price: null, mrp: null, priceHikeActive: false, pincodes: [], errors: [] };
         row.offerCheck = result.offerCheck === true;
         row.offerDetected = result.offerDetected === true;
         row.offerName = result.offerName || '';
+        if (Number(result.price) > 0) row.price = Number(result.price);
+        if (Number(result.mrp) > 0) row.mrp = Number(result.mrp);
+        row.priceHikeActive = state.priceHikeKeys.has(result.key);
         row.pincodes = row.pincodes.filter(pin => pin !== result.pincode);
         row.errors = (row.errors || []).filter(error => error.pincode !== result.pincode);
         if (result.available) row.pincodes.push(result.pincode);
@@ -439,17 +532,24 @@
     clearTimeout(state.timer); state.timer = null;
     if (state.wake) { const wake = state.wake; state.wake = null; wake(); }
     stopErrorAlarm(); stopMario();
+    state.priceAlertActive = false;
+    state.priceHikeKeys.clear();
+    state.rows.forEach(row => { row.priceHikeActive = false; });
+    stopPriceAlarm();
     state.screenKeep = false; stopScreenRefresh(); releaseScreenLock(); updateScreenButton();
     $('status').textContent = 'Stopped. Saved results remain below.';
     $('start').disabled = false; $('start').textContent = '▶ Start checking'; $('stop').disabled = true;
+    renderPricePanel();
   }
-  function clearResults() { stop(); stopErrorAlarm(); state.rows.clear(); try { localStorage.removeItem(RESULTS_KEY); } catch {} $('progressBar').style.width = '0'; $('status').textContent = ''; render(); }
+  function clearResults() { stop(); stopErrorAlarm(); state.rows.clear(); state.priceHistory = {}; state.priceChanges = []; state.priceErrors = 0; try { localStorage.removeItem(RESULTS_KEY); localStorage.removeItem(PRICE_HISTORY_KEY); } catch {} $('progressBar').style.width = '0'; $('status').textContent = ''; render(); }
 
   function load() {
     try {
       const settings = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
       $('products').value = migrateProducts(settings.products); $('pincodes').value = settings.pincodes || ''; $('category').value = settings.category || 'mobile'; $('interval').value = settings.interval || '1'; state.muted = settings.muted === true; setCoupon(settings.coupon === true, false);
       const results = JSON.parse(localStorage.getItem(RESULTS_KEY) || '[]'); results.forEach(row => state.rows.set(row.key, row));
+      const prices = JSON.parse(localStorage.getItem(PRICE_HISTORY_KEY) || '{}');
+      if (prices && typeof prices === 'object' && !Array.isArray(prices)) state.priceHistory = prices;
     } catch {}
     counts(); setMute(); render();
   }
@@ -464,8 +564,9 @@
   $('pincodeChips').addEventListener('click', event => { const button = event.target.closest('[data-remove]'); if (!button) return; $('pincodes').value = pinCodes($('pincodes').value).filter(value => value !== button.dataset.remove).join('\n'); $('pincodes').dispatchEvent(new Event('input', { bubbles:true })); });
   $('category').addEventListener('input', saveSettings); $('interval').addEventListener('change', saveSettings);
   $('coupon').addEventListener('click', () => setCoupon($('coupon').dataset.on !== 'true'));
-  $('mute').addEventListener('click', () => { state.muted = !state.muted; if (state.muted) stopErrorAlarm(); setMute(); saveSettings(); });
+  $('mute').addEventListener('click', () => { state.muted = !state.muted; setMute(); saveSettings(); });
   $('start').addEventListener('click', start); $('stop').addEventListener('click', stop); $('clear').addEventListener('click', clearResults);
+  $('ackPrice').addEventListener('click', acknowledgePriceAlerts);
   $('copyDevice').addEventListener('click', async () => { try { await navigator.clipboard.writeText(state.deviceId); $('copyDevice').textContent = 'Copied'; setTimeout(() => { $('copyDevice').textContent = 'Copy ID'; }, 1500); } catch { $('accessMessage').textContent = 'Copy failed. Press and hold the Device ID to copy it.'; } });
   $('recheckAccess').addEventListener('click', checkAccess);
   window.addEventListener('online', () => setNetwork('online', '● Network connected'));
