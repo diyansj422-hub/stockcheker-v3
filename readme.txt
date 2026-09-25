@@ -19,6 +19,9 @@ user presses "OK, I KNOW - Restart checking". The button stops the ringtone,
 releases the hold and continues stock and price checks. Price decreases stay
 visible with the stock signal.
 
+Transient API errors do not clear the last known stock result. The app shows an
+API error status, waits 10 seconds, and retries the stock and price scan.
+
 The app stores the watchlist, filters and latest results in the browser's local
 storage. The included serverless route is required because Croma's API does not
 allow direct browser requests from a static page. Keep the route folder named

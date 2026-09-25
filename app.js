@@ -2,6 +2,7 @@
   const MAX_PRODUCTS = 50;
   const PARALLEL = 25;
   const BATCH_TIMEOUT_MS = 8000;
+  const API_RETRY_DELAY_MS = 10000;
   const DEVICE_KEY = 'croma_stock_signal_device_id_v1';
   const DEVICE_COOKIE = 'croma_stock_signal_device_id_v1';
   const SETTINGS_KEY = 'croma_stock_signal_settings_v1';
@@ -475,11 +476,17 @@
         row.offerName = result.offerName || '';
         if (Number(result.price) > 0) row.price = Number(result.price);
         row.priceHikeActive = state.priceHikeKeys.has(result.key);
-        row.pincodes = row.pincodes.filter(pin => pin !== result.pincode);
         row.errors = (row.errors || []).filter(error => error.pincode !== result.pincode);
-        if (result.available) row.pincodes.push(result.pincode);
-        if (result.error) { row.errors.push({ pincode: result.pincode, message: result.error }); hadError = true; errorMessage ||= result.error; setNetwork('error', '⚠ Croma API error'); }
-        row.available = row.pincodes.length > 0;
+        if (result.error) {
+          row.errors.push({ pincode: result.pincode, message: result.error });
+          hadError = true;
+          errorMessage ||= result.error;
+          setNetwork('error', '⚠ Croma API error');
+        } else {
+          row.pincodes = row.pincodes.filter(pin => pin !== result.pincode);
+          if (result.available) row.pincodes.push(result.pincode);
+          row.available = row.pincodes.length > 0;
+        }
         state.rows.set(result.key, row);
       });
       completed += batch.length;
@@ -493,6 +500,8 @@
     if (visible.length && !hadError) playMario(); else stopMario();
     state.lastError = hadError ? errorMessage : '';
     render();
+    if (hadError) $('status').textContent = 'API error. Retrying in 10 seconds...';
+    return hadError;
   }
 
   async function start() {
@@ -501,8 +510,9 @@
     state.running = true; state.screenKeep = true; $('start').disabled = true; $('start').textContent = '▶ Checking Stock...'; $('stop').disabled = false; saveSettings(); unlockAudio(); keepScreenOn(); startScreenRefresh(); updateScreenButton();
     try {
       while (state.running) {
+        let apiError = false;
         try {
-          await scanOnce();
+          apiError = await scanOnce();
         } catch (error) {
           if (!state.running) break;
           state.requestErrors += 1;
@@ -511,7 +521,10 @@
           stopErrorAlarm(); render();
           if (!error.retryable) { state.running = false; break; }
         }
-        if (state.running) await waitForNextScan(Math.max(1, Number($('interval').value) || 1) * 1000);
+        if (state.running) {
+          const delay = apiError ? API_RETRY_DELAY_MS : Math.max(1, Number($('interval').value) || 1) * 1000;
+          await waitForNextScan(delay);
+        }
       }
     } finally {
       clearTimeout(state.timer); state.timer = null; state.wake = null; state.running = false; state.screenKeep = false; stopScreenRefresh(); releaseScreenLock(); $('start').disabled = false; $('stop').disabled = true; updateScreenButton();
