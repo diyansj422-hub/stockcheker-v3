@@ -195,13 +195,11 @@ async function priceInfo(productId, pincode) {
 
     return {
       price: amount(item.sellingPriceValue ?? item.sellingPrice),
-      mrp: amount(item.mrpValue ?? item.mrp),
       priceError: ''
     };
   } catch (error) {
     return {
       price: null,
-      mrp: null,
       priceError: error.message || 'Price lookup failed.'
     };
   }
@@ -397,7 +395,6 @@ module.exports = async function handler(req, res) {
           offerDetected: item.offerDetected === true,
           offerName: item.offerName || '',
           price: price.price,
-          mrp: price.mrp,
           priceError: price.priceError || ''
         },
         category
