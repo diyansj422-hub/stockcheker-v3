@@ -1,5 +1,6 @@
 const INVENTORY_API = 'https://api.croma.com/inventory/oms/v2/tms/details-pwa/';
 const PRODUCT_API = 'https://api.croma.com/catalog/v1/product/detail';
+const PRICE_API = 'https://api.croma.com/pricing-services/v2/price/national';
 const PROMOTION_API = 'https://api.tatadigital.com/getApplicablePromotion/getApplicationPromotionsForItemOffer';
 const PROMOTION_PROGRAM = '01eae2ec-0576-1000-bbea-86e16dcb4b79';
 const PROMOTION_AUTHORIZATION = '8Tksadcs85ad4vsasfasgf4sJHvfs4NiKNKLHKLH582546f646';
@@ -164,6 +165,48 @@ function activeOffer(data) {
   });
 }
 
+function amount(value) {
+  const parsed = Number(String(value ?? '').replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function priceInfo(productId, pincode) {
+  try {
+    const response = await fetch(
+      `${PRICE_API}?itemIds=${encodeURIComponent(productId)}&pincode=${encodeURIComponent(pincode)}`,
+      {
+        headers: {
+          Accept: 'application/json, text/plain, */*',
+          channel: 'EC',
+          Origin: 'https://www.croma.com',
+          Referer: 'https://www.croma.com/'
+        }
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Price lookup failed (${response.status}).`);
+    }
+
+    const data = await response.json();
+    const item = list(data?.pricelist).find(
+      entry => String(entry?.itemId || '') === String(productId)
+    ) || list(data?.pricelist)[0] || {};
+
+    return {
+      price: amount(item.sellingPriceValue ?? item.sellingPrice),
+      mrp: amount(item.mrpValue ?? item.mrp),
+      priceError: ''
+    };
+  } catch (error) {
+    return {
+      price: null,
+      mrp: null,
+      priceError: error.message || 'Price lookup failed.'
+    };
+  }
+}
+
 async function promotions(productId) {
   const response = await fetch(PROMOTION_API, {
     method: 'POST',
@@ -321,15 +364,29 @@ module.exports = async function handler(req, res) {
 
   const ids = [...new Set(jobs.map(job => String(job.productId)))];
 
+  const priceKeys = [...new Set(
+    jobs.map(job => `${String(job.productId)}:${String(job.pincode)}`)
+  )];
+
   const info = new Map(
     await Promise.all(
       ids.map(async id => [id, await productInfo(id)])
     )
   );
 
+  const prices = new Map(
+    await Promise.all(
+      priceKeys.map(async key => {
+        const [productId, pincode] = key.split(':');
+        return [key, await priceInfo(productId, pincode)];
+      })
+    )
+  );
+
   const results = await Promise.all(
     jobs.map(job => {
       const item = info.get(String(job.productId)) || {};
+      const price = prices.get(`${job.productId}:${job.pincode}`) || {};
 
       return inventory(
         {
@@ -338,7 +395,10 @@ module.exports = async function handler(req, res) {
           pincode: String(job.pincode),
           name: item.name || `Product ${job.productId}`,
           offerDetected: item.offerDetected === true,
-          offerName: item.offerName || ''
+          offerName: item.offerName || '',
+          price: price.price,
+          mrp: price.mrp,
+          priceError: price.priceError || ''
         },
         category
       );
