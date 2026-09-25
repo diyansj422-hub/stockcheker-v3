@@ -1,0 +1,12 @@
+{
+  "name": "croma-stock-signal",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Croma Stock Signal web app and API",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  }
+}
