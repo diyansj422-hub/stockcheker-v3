@@ -469,12 +469,11 @@
       results.forEach(result => {
         if (result.priceError) state.priceErrors += 1;
         recordPrice(result);
-        const row = state.rows.get(result.key) || { key: result.key, offerCheck: result.offerCheck, offerDetected: result.offerDetected, offerName: result.offerName || '', price: null, mrp: null, priceHikeActive: false, pincodes: [], errors: [] };
+        const row = state.rows.get(result.key) || { key: result.key, offerCheck: result.offerCheck, offerDetected: result.offerDetected, offerName: result.offerName || '', price: null, priceHikeActive: false, pincodes: [], errors: [] };
         row.offerCheck = result.offerCheck === true;
         row.offerDetected = result.offerDetected === true;
         row.offerName = result.offerName || '';
         if (Number(result.price) > 0) row.price = Number(result.price);
-        if (Number(result.mrp) > 0) row.mrp = Number(result.mrp);
         row.priceHikeActive = state.priceHikeKeys.has(result.key);
         row.pincodes = row.pincodes.filter(pin => pin !== result.pincode);
         row.errors = (row.errors || []).filter(error => error.pincode !== result.pincode);
